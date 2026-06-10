@@ -2,6 +2,7 @@ import 'dotenv/config';
 import cors from 'cors';
 import express, { type Request, type Response } from 'express';
 import { GoogleGenAI } from '@google/genai';
+import { executeLocalQuery } from './db';
 
 type GeminiMessage = unknown;
 
@@ -14,6 +15,9 @@ if (!apiKey) {
 const ai = new GoogleGenAI({ apiKey });
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
+
+const startupSales = executeLocalQuery('SELECT * FROM sales');
+console.log('Startup sales snapshot:', startupSales);
 
 app.use(express.json());
 app.use(
