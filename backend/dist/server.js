@@ -8,6 +8,20 @@ const cors_1 = __importDefault(require("cors"));
 const express_1 = __importDefault(require("express"));
 const genai_1 = require("@google/genai");
 const db_1 = require("./db");
+const executeSqlTool = {
+    name: 'executeLocalSql',
+    description: 'Executes a raw read or write SQL query against the local SQLite database. Use this anytime the user asks to view, insert, modify, or analyze database information.',
+    parameters: {
+        type: 'OBJECT',
+        properties: {
+            query: {
+                type: 'STRING',
+                description: 'The exact, valid SQLite statement to execute.',
+            },
+        },
+        required: ['query'],
+    },
+};
 const apiKey = process.env.GEMINI_API_KEY;
 if (!apiKey) {
     throw new Error('GEMINI_API_KEY is missing from the backend environment');
@@ -24,18 +38,66 @@ app.use((0, cors_1.default)({
 app.get('/health', (_request, response) => {
     response.json({ ok: true });
 });
+function createModelTurn(functionCalls) {
+    return {
+        role: 'model',
+        parts: functionCalls.map((functionCall) => ({ functionCall })),
+    };
+}
+function createToolResponseTurn(functionCalls) {
+    return {
+        role: 'user',
+        parts: functionCalls.map((functionCall) => {
+            const query = typeof functionCall.args?.query === 'string' ? functionCall.args.query : '';
+            const executionResult = (0, db_1.executeLocalQuery)(query);
+            const isErrorMessage = typeof executionResult === 'string' && !executionResult.startsWith('Rows modified: ');
+            return {
+                functionResponse: {
+                    id: functionCall.id,
+                    name: functionCall.name,
+                    response: isErrorMessage
+                        ? { error: executionResult }
+                        : { output: executionResult },
+                },
+            };
+        }),
+    };
+}
+async function generateChatResponse(contents) {
+    return ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: contents,
+        config: {
+            systemInstruction: "You are an analytical local database agent. You have access to a local SQLite database with tables like 'sales'. Do not invent column or table names; always use correct SQL syntax. If an operation fails, you will receive the raw error message to help you self-correct.",
+            tools: [
+                {
+                    functionDeclarations: [executeSqlTool],
+                },
+            ],
+        },
+    });
+}
 app.post('/api/chat', async (request, response) => {
     const messages = request.body.messages;
     if (!Array.isArray(messages)) {
-        response.status(400).json({ error: 'Request body must be an array of messages.' });
+        response.status(400).json({ error: 'Request body must include a messages array.' });
         return;
     }
     try {
-        const result = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: messages,
-        });
-        response.json({ response: result.text ?? '' });
+        const initialResponse = await generateChatResponse(messages);
+        const functionCalls = initialResponse.functionCalls ?? [];
+        const sqlFunctionCalls = functionCalls.filter((functionCall) => functionCall.name === executeSqlTool.name);
+        if (sqlFunctionCalls.length === 0) {
+            response.json({ response: initialResponse.text ?? '' });
+            return;
+        }
+        const updatedHistory = [
+            ...messages,
+            createModelTurn(functionCalls),
+            createToolResponseTurn(sqlFunctionCalls),
+        ];
+        const finalResponse = await generateChatResponse(updatedHistory);
+        response.json({ response: finalResponse.text ?? '' });
     }
     catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown Gemini error';
