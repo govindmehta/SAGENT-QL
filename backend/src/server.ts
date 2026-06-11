@@ -1,7 +1,10 @@
 import 'dotenv/config';
 import cors from 'cors';
+import fs from 'fs';
 import express, { type Request, type Response } from 'express';
 import { GoogleGenAI } from '@google/genai';
+import multer from 'multer';
+import path from 'path';
 import { executeLocalQuery, getChatHistory, saveMessage } from './db';
 import { scanLocalWorkbook } from './excelScanner';
 
@@ -60,6 +63,17 @@ type GeminiFunctionCall = {
   args?: Record<string, unknown>;
 };
 
+type AttachmentPayload = {
+  name: string;
+  path: string;
+};
+
+type ChatRequestBody = {
+  sessionId?: string;
+  message?: string;
+  attachment?: AttachmentPayload | null;
+};
+
 const apiKey = process.env.GEMINI_API_KEY;
 
 if (!apiKey) {
@@ -69,6 +83,22 @@ if (!apiKey) {
 const ai = new GoogleGenAI({ apiKey });
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
+const uploadsDir = path.resolve(process.cwd(), 'uploads');
+
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+const uploadStorage = multer.diskStorage({
+  destination: (_request, _file, callback) => {
+    callback(null, uploadsDir);
+  },
+  filename: (_request, file, callback) => {
+    callback(null, `${Date.now()}-${file.originalname}`);
+  },
+});
+
+const upload = multer({ storage: uploadStorage });
 
 const startupSales = executeLocalQuery('SELECT * FROM sales');
 console.log('Startup sales snapshot:', startupSales);
@@ -82,6 +112,21 @@ app.use(
 
 app.get('/health', (_request: Request, response: Response) => {
   response.json({ ok: true });
+});
+
+app.post('/api/upload', upload.single('file'), (request: Request, response: Response) => {
+  const file = request.file;
+
+  if (!file) {
+    response.status(400).json({ error: 'No file was provided.' });
+    return;
+  }
+
+  response.json({
+    success: true,
+    filePath: `./uploads/${file.filename}`,
+    originalName: file.originalname,
+  });
 });
 
 function createModelTurn(functionCalls: GeminiFunctionCall[]) {
@@ -106,6 +151,33 @@ function isRateLimitError(error: unknown) {
     message.includes('RESOURCE_EXHAUSTED') ||
     message.includes('429')
   );
+}
+
+function formatAttachmentContext(attachment: AttachmentPayload, scanResult: unknown) {
+  if (!scanResult || typeof scanResult !== 'object') {
+    return '';
+  }
+
+  const result = scanResult as {
+    sheetName?: string;
+    headers?: string[];
+    sampleRows?: Array<Record<string, unknown>>;
+    totalRowCount?: number;
+    error?: string;
+  };
+
+  if (result.error) {
+    throw new Error(result.error);
+  }
+
+  const schemaText = [
+    `Sheet name: ${result.sheetName ?? 'Unknown'}`,
+    `Columns: ${(result.headers ?? []).join(', ') || 'None found'}`,
+    `Total rows: ${result.totalRowCount ?? 0}`,
+    `Sample rows: ${JSON.stringify(result.sampleRows ?? [], null, 2)}`,
+  ].join(' | ');
+
+  return `[CONTEXT: The user has attached a file named "${attachment.name}" located locally at "${attachment.path}". Its structural schema is: ${schemaText}]`;
 }
 
 async function createToolResponseTurn(functionCalls: GeminiFunctionCall[]) {
@@ -186,28 +258,37 @@ async function generateChatResponse(contents: ChatMessage[]) {
 }
 
 app.post('/api/chat', async (request: Request, response: Response) => {
-  const messages = request.body.messages;
-  const sessionId = typeof request.body.sessionId === 'string' && request.body.sessionId.trim()
-    ? request.body.sessionId.trim()
-    : 'default-session';
+  const { message, sessionId, attachment } = request.body as ChatRequestBody;
+  const activeSessionId = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : 'default-session';
+  const userMessageText = typeof message === 'string' ? message.trim() : '';
 
-  if (!Array.isArray(messages)) {
-    response.status(400).json({ error: 'Request body must include a messages array.' });
+  if (!userMessageText) {
+    response.status(400).json({ error: 'Request body must include a message string.' });
     return;
   }
 
   try {
-    const chatHistory = getChatHistory(sessionId);
-    const incomingMessages = messages as ChatMessage[];
-    const currentUserMessage = [...incomingMessages]
-      .reverse()
-      .find((message) => message.role === 'user' && typeof message.parts?.[0]?.text === 'string');
+    const chatHistory = getChatHistory(activeSessionId);
+    saveMessage(activeSessionId, 'user', userMessageText);
 
-    if (currentUserMessage?.parts?.[0]?.text) {
-      saveMessage(sessionId, 'user', currentUserMessage.parts[0].text);
+    let contextualizedUserText = userMessageText;
+
+    if (attachment?.path) {
+      const scanResult = await scanLocalWorkbook(attachment.path);
+      const attachmentContext = formatAttachmentContext(attachment, scanResult);
+
+      if (attachmentContext) {
+        contextualizedUserText = `${attachmentContext}\n\n${userMessageText}`;
+      }
     }
 
-    const compiledContents = [...chatHistory, ...incomingMessages];
+    const compiledContents = [
+      ...chatHistory,
+      {
+        role: 'user',
+        parts: [{ text: contextualizedUserText }],
+      },
+    ];
 
     const initialResponse = await generateChatResponse(compiledContents);
     const functionCalls = initialResponse.functionCalls ?? [];
@@ -216,7 +297,7 @@ app.post('/api/chat', async (request: Request, response: Response) => {
     if (supportedFunctionCalls.length === 0) {
       const finalText = initialResponse.text ?? '';
       if (finalText) {
-        saveMessage(sessionId, 'model', finalText);
+        saveMessage(activeSessionId, 'model', finalText);
       }
 
       response.json({ response: finalText });
@@ -233,7 +314,7 @@ app.post('/api/chat', async (request: Request, response: Response) => {
     const finalText = finalResponse.text ?? '';
 
     if (finalText) {
-      saveMessage(sessionId, 'model', finalText);
+      saveMessage(activeSessionId, 'model', finalText);
     }
 
     response.json({ response: finalText });

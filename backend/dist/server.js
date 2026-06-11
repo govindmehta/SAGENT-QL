@@ -5,8 +5,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 require("dotenv/config");
 const cors_1 = __importDefault(require("cors"));
+const fs_1 = __importDefault(require("fs"));
 const express_1 = __importDefault(require("express"));
 const genai_1 = require("@google/genai");
+const multer_1 = __importDefault(require("multer"));
+const path_1 = __importDefault(require("path"));
 const db_1 = require("./db");
 const excelScanner_1 = require("./excelScanner");
 const executeSqlTool = {
@@ -44,6 +47,19 @@ if (!apiKey) {
 const ai = new genai_1.GoogleGenAI({ apiKey });
 const app = (0, express_1.default)();
 const port = Number(process.env.PORT ?? 3001);
+const uploadsDir = path_1.default.resolve(process.cwd(), 'uploads');
+if (!fs_1.default.existsSync(uploadsDir)) {
+    fs_1.default.mkdirSync(uploadsDir, { recursive: true });
+}
+const uploadStorage = multer_1.default.diskStorage({
+    destination: (_request, _file, callback) => {
+        callback(null, uploadsDir);
+    },
+    filename: (_request, file, callback) => {
+        callback(null, `${Date.now()}-${file.originalname}`);
+    },
+});
+const upload = (0, multer_1.default)({ storage: uploadStorage });
 const startupSales = (0, db_1.executeLocalQuery)('SELECT * FROM sales');
 console.log('Startup sales snapshot:', startupSales);
 app.use(express_1.default.json());
@@ -52,6 +68,18 @@ app.use((0, cors_1.default)({
 }));
 app.get('/health', (_request, response) => {
     response.json({ ok: true });
+});
+app.post('/api/upload', upload.single('file'), (request, response) => {
+    const file = request.file;
+    if (!file) {
+        response.status(400).json({ error: 'No file was provided.' });
+        return;
+    }
+    response.json({
+        success: true,
+        filePath: `./uploads/${file.filename}`,
+        originalName: file.originalname,
+    });
 });
 function createModelTurn(functionCalls) {
     return {
@@ -70,6 +98,22 @@ function isRateLimitError(error) {
         code === 429 ||
         message.includes('RESOURCE_EXHAUSTED') ||
         message.includes('429'));
+}
+function formatAttachmentContext(attachment, scanResult) {
+    if (!scanResult || typeof scanResult !== 'object') {
+        return '';
+    }
+    const result = scanResult;
+    if (result.error) {
+        throw new Error(result.error);
+    }
+    const schemaText = [
+        `Sheet name: ${result.sheetName ?? 'Unknown'}`,
+        `Columns: ${(result.headers ?? []).join(', ') || 'None found'}`,
+        `Total rows: ${result.totalRowCount ?? 0}`,
+        `Sample rows: ${JSON.stringify(result.sampleRows ?? [], null, 2)}`,
+    ].join(' | ');
+    return `[CONTEXT: The user has attached a file named "${attachment.name}" located locally at "${attachment.path}". Its structural schema is: ${schemaText}]`;
 }
 async function createToolResponseTurn(functionCalls) {
     const parts = await Promise.all(functionCalls.map(async (functionCall) => {
@@ -132,31 +176,38 @@ async function generateChatResponse(contents) {
     }
 }
 app.post('/api/chat', async (request, response) => {
-    const messages = request.body.messages;
-    const sessionId = typeof request.body.sessionId === 'string' && request.body.sessionId.trim()
-        ? request.body.sessionId.trim()
-        : 'default-session';
-    if (!Array.isArray(messages)) {
-        response.status(400).json({ error: 'Request body must include a messages array.' });
+    const { message, sessionId, attachment } = request.body;
+    const activeSessionId = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : 'default-session';
+    const userMessageText = typeof message === 'string' ? message.trim() : '';
+    if (!userMessageText) {
+        response.status(400).json({ error: 'Request body must include a message string.' });
         return;
     }
     try {
-        const chatHistory = (0, db_1.getChatHistory)(sessionId);
-        const incomingMessages = messages;
-        const currentUserMessage = [...incomingMessages]
-            .reverse()
-            .find((message) => message.role === 'user' && typeof message.parts?.[0]?.text === 'string');
-        if (currentUserMessage?.parts?.[0]?.text) {
-            (0, db_1.saveMessage)(sessionId, 'user', currentUserMessage.parts[0].text);
+        const chatHistory = (0, db_1.getChatHistory)(activeSessionId);
+        (0, db_1.saveMessage)(activeSessionId, 'user', userMessageText);
+        let contextualizedUserText = userMessageText;
+        if (attachment?.path) {
+            const scanResult = await (0, excelScanner_1.scanLocalWorkbook)(attachment.path);
+            const attachmentContext = formatAttachmentContext(attachment, scanResult);
+            if (attachmentContext) {
+                contextualizedUserText = `${attachmentContext}\n\n${userMessageText}`;
+            }
         }
-        const compiledContents = [...chatHistory, ...incomingMessages];
+        const compiledContents = [
+            ...chatHistory,
+            {
+                role: 'user',
+                parts: [{ text: contextualizedUserText }],
+            },
+        ];
         const initialResponse = await generateChatResponse(compiledContents);
         const functionCalls = initialResponse.functionCalls ?? [];
         const supportedFunctionCalls = functionCalls.filter(isSupportedFunctionCall);
         if (supportedFunctionCalls.length === 0) {
             const finalText = initialResponse.text ?? '';
             if (finalText) {
-                (0, db_1.saveMessage)(sessionId, 'model', finalText);
+                (0, db_1.saveMessage)(activeSessionId, 'model', finalText);
             }
             response.json({ response: finalText });
             return;
@@ -169,7 +220,7 @@ app.post('/api/chat', async (request, response) => {
         const finalResponse = await generateChatResponse(updatedHistory);
         const finalText = finalResponse.text ?? '';
         if (finalText) {
-            (0, db_1.saveMessage)(sessionId, 'model', finalText);
+            (0, db_1.saveMessage)(activeSessionId, 'model', finalText);
         }
         response.json({ response: finalText });
     }
