@@ -5,6 +5,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.db = void 0;
 exports.executeLocalQuery = executeLocalQuery;
+exports.saveMessage = saveMessage;
+exports.getChatHistory = getChatHistory;
 const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 const path_1 = __importDefault(require("path"));
 const databasePath = path_1.default.resolve(process.cwd(), 'data.db');
@@ -16,6 +18,14 @@ exports.db.exec(`
     item_name TEXT NOT NULL,
     units_sold INTEGER NOT NULL,
     sale_date TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS chat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 const salesCount = exports.db.prepare('SELECT COUNT(*) as count FROM sales').get();
@@ -34,6 +44,8 @@ if (salesCount.count === 0) {
     });
     seedTransaction();
 }
+const insertChatMessage = exports.db.prepare('INSERT INTO chat_history (session_id, role, content) VALUES (?, ?, ?)');
+const selectChatHistory = exports.db.prepare('SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY id DESC LIMIT ?');
 function executeLocalQuery(sql, params = []) {
     const trimmedSql = sql.trim();
     const isReadQuery = /^(select|with|pragma)\b/i.test(trimmedSql);
@@ -48,4 +60,16 @@ function executeLocalQuery(sql, params = []) {
     catch (error) {
         return error instanceof Error ? error.message : String(error);
     }
+}
+function saveMessage(sessionId, role, content) {
+    insertChatMessage.run(sessionId, role, content);
+}
+function getChatHistory(sessionId, limit = 20) {
+    const rows = selectChatHistory.all(sessionId, limit);
+    return rows
+        .reverse()
+        .map((row) => ({
+        role: row.role,
+        parts: [{ text: row.content }],
+    }));
 }

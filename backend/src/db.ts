@@ -1,6 +1,13 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 
+type ChatRole = 'user' | 'model';
+
+type GeminiChatMessage = {
+  role: ChatRole;
+  parts: [{ text: string }];
+};
+
 const databasePath = path.resolve(process.cwd(), 'data.db');
 export const db = new Database(databasePath);
 
@@ -12,6 +19,14 @@ db.exec(`
     item_name TEXT NOT NULL,
     units_sold INTEGER NOT NULL,
     sale_date TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS chat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 `);
 
@@ -38,6 +53,14 @@ if (salesCount.count === 0) {
   seedTransaction();
 }
 
+const insertChatMessage = db.prepare(
+  'INSERT INTO chat_history (session_id, role, content) VALUES (?, ?, ?)'
+);
+
+const selectChatHistory = db.prepare(
+  'SELECT role, content FROM chat_history WHERE session_id = ? ORDER BY id DESC LIMIT ?'
+);
+
 export function executeLocalQuery(sql: string, params: any[] = []) {
   const trimmedSql = sql.trim();
   const isReadQuery = /^(select|with|pragma)\b/i.test(trimmedSql);
@@ -54,4 +77,22 @@ export function executeLocalQuery(sql: string, params: any[] = []) {
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
+}
+
+export function saveMessage(sessionId: string, role: ChatRole, content: string) {
+  insertChatMessage.run(sessionId, role, content);
+}
+
+export function getChatHistory(sessionId: string, limit: number = 20): GeminiChatMessage[] {
+  const rows = selectChatHistory.all(sessionId, limit) as Array<{
+    role: ChatRole;
+    content: string;
+  }>;
+
+  return rows
+    .reverse()
+    .map((row) => ({
+      role: row.role,
+      parts: [{ text: row.content }],
+    }));
 }

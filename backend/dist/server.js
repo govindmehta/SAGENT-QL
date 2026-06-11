@@ -114,25 +114,45 @@ async function generateChatResponse(contents) {
 }
 app.post('/api/chat', async (request, response) => {
     const messages = request.body.messages;
+    const sessionId = typeof request.body.sessionId === 'string' && request.body.sessionId.trim()
+        ? request.body.sessionId.trim()
+        : 'default-session';
     if (!Array.isArray(messages)) {
         response.status(400).json({ error: 'Request body must include a messages array.' });
         return;
     }
     try {
-        const initialResponse = await generateChatResponse(messages);
+        const chatHistory = (0, db_1.getChatHistory)(sessionId);
+        const incomingMessages = messages;
+        const currentUserMessage = [...incomingMessages]
+            .reverse()
+            .find((message) => message.role === 'user' && typeof message.parts?.[0]?.text === 'string');
+        if (currentUserMessage?.parts?.[0]?.text) {
+            (0, db_1.saveMessage)(sessionId, 'user', currentUserMessage.parts[0].text);
+        }
+        const compiledContents = [...chatHistory, ...incomingMessages];
+        const initialResponse = await generateChatResponse(compiledContents);
         const functionCalls = initialResponse.functionCalls ?? [];
         const supportedFunctionCalls = functionCalls.filter(isSupportedFunctionCall);
         if (supportedFunctionCalls.length === 0) {
-            response.json({ response: initialResponse.text ?? '' });
+            const finalText = initialResponse.text ?? '';
+            if (finalText) {
+                (0, db_1.saveMessage)(sessionId, 'model', finalText);
+            }
+            response.json({ response: finalText });
             return;
         }
         const updatedHistory = [
-            ...messages,
+            ...compiledContents,
             createModelTurn(functionCalls),
             await createToolResponseTurn(supportedFunctionCalls),
         ];
         const finalResponse = await generateChatResponse(updatedHistory);
-        response.json({ response: finalResponse.text ?? '' });
+        const finalText = finalResponse.text ?? '';
+        if (finalText) {
+            (0, db_1.saveMessage)(sessionId, 'model', finalText);
+        }
+        response.json({ response: finalText });
     }
     catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown Gemini error';
