@@ -1,92 +1,349 @@
-import {
-  Database,
-  FileSpreadsheet,
-  MessageSquareText,
-  Settings2,
-} from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowUpRight, Plus, Sparkles } from 'lucide-react';
 
-const capabilities = [
+type ChatRole = 'user' | 'agent';
+
+type ChatMessage = {
+  id: string;
+  role: ChatRole;
+  text: string;
+};
+
+type SessionSummary = {
+  id: string;
+  title: string;
+  preview: string;
+};
+
+const initialSessionId = 'session-1';
+const chatEndpoint = 'http://localhost:3001/api/chat';
+
+const initialSessions: SessionSummary[] = [
   {
-    icon: Database,
-    title: 'Local SQL engine',
-    description: 'Query data with a synchronous SQLite layer that stays on device.',
-  },
-  {
-    icon: FileSpreadsheet,
-    title: 'Spreadsheet scanning',
-    description: 'Parse Excel files locally and route them into the agent loop.',
-  },
-  {
-    icon: MessageSquareText,
-    title: 'Manual agent loop',
-    description: 'Own chat history, tool matching, and execution without wrapper SDKs.',
+    id: initialSessionId,
+    title: 'Session 1',
+    preview: 'Ready when you are.',
   },
 ];
 
-export default function App() {
+function createSessionId() {
+  return `session-${Date.now()}`;
+}
+
+function createMessageId() {
+  return crypto.randomUUID();
+}
+
+function getSessionTitle(index: number) {
+  return `Session ${index + 1}`;
+}
+
+function LoadingDots() {
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-10 lg:px-10">
-        <header className="flex items-center justify-between border-b border-white/10 pb-6">
-          <div>
-            <p className="text-sm uppercase tracking-[0.35em] text-cyan-300/80">
-              Local-first agent
-            </p>
-            <h1 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
-              SAGENT-QL
-            </h1>
-          </div>
-          <div className="rounded-full border border-cyan-400/30 bg-cyan-400/10 p-3 text-cyan-300 shadow-glow">
-            <Settings2 className="h-5 w-5" />
-          </div>
-        </header>
+    <div className="flex items-center gap-1.5 px-4 py-3 text-zinc-500">
+      <span
+        className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400/80"
+        style={{ animationDelay: '0ms' }}
+      />
+      <span
+        className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400/80"
+        style={{ animationDelay: '120ms' }}
+      />
+      <span
+        className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400/80"
+        style={{ animationDelay: '240ms' }}
+      />
+      <span className="ml-2 text-xs font-medium tracking-wide text-zinc-400">Thinking...</span>
+    </div>
+  );
+}
 
-        <section className="grid flex-1 gap-8 py-10 lg:grid-cols-[1.35fr_0.9fr] lg:items-center">
-          <div className="space-y-6">
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-300">
-              <span className="h-2 w-2 rounded-full bg-cyan-300" />
-              Vite + React 19 frontend with Tailwind CSS
+function SessionItem({
+  session,
+  active,
+  onSelect,
+}: {
+  session: SessionSummary;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`group w-full rounded-2xl px-3 py-3 text-left transition ${
+        active ? 'bg-zinc-900 text-white' : 'hover:bg-zinc-100 text-zinc-700'
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        <span
+          className={`mt-1.5 h-2 w-2 rounded-full transition ${
+            active ? 'bg-zinc-100' : 'bg-zinc-300 group-hover:bg-zinc-400'
+          }`}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium tracking-tight">{session.title}</div>
+          <div className={`mt-1 truncate text-xs leading-5 ${active ? 'text-zinc-300' : 'text-zinc-500'}`}>
+            {session.preview}
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+export default function App() {
+  const [sessionId, setSessionId] = useState(initialSessionId);
+  const [draft, setDraft] = useState('');
+  const [isPending, setIsPending] = useState(false);
+  const [sessions, setSessions] = useState<SessionSummary[]>(initialSessions);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  const messageStoreRef = useRef<Record<string, ChatMessage[]>>({
+    [initialSessionId]: [],
+  });
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages, isPending, sessionId]);
+
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, [sessionId]);
+
+  function syncSessionMessages(activeSessionId: string, nextMessages: ChatMessage[]) {
+    messageStoreRef.current[activeSessionId] = nextMessages;
+    setMessages(nextMessages);
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === activeSessionId
+          ? {
+              ...session,
+              preview: nextMessages.at(-1)?.text ?? 'Ready when you are.',
+            }
+          : session
+      )
+    );
+  }
+
+  function openSession(targetSessionId: string) {
+    setSessionId(targetSessionId);
+    setMessages(messageStoreRef.current[targetSessionId] ?? []);
+  }
+
+  function createNewConversation() {
+    const newSessionId = createSessionId();
+    messageStoreRef.current[newSessionId] = [];
+
+    setSessions((current) => [
+      ...current,
+      {
+        id: newSessionId,
+        title: getSessionTitle(current.length),
+        preview: 'Ready when you are.',
+      },
+    ]);
+
+    setSessionId(newSessionId);
+    setMessages([]);
+    setDraft('');
+  }
+
+  async function handleSendMessage(text: string) {
+    const trimmedText = text.trim();
+    if (!trimmedText || isPending) {
+      return;
+    }
+
+    const userMessage: ChatMessage = {
+      id: createMessageId(),
+      role: 'user',
+      text: trimmedText,
+    };
+
+    const optimisticMessages = [...messages, userMessage];
+
+    syncSessionMessages(sessionId, optimisticMessages);
+    setDraft('');
+    setIsPending(true);
+
+    try {
+      const response = await fetch(chatEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sessionId,
+          messages: [
+            {
+              role: 'user',
+              parts: [{ text: trimmedText }],
+            },
+          ],
+        }),
+      });
+
+      const payload = (await response.json()) as { response?: string; error?: string };
+      const agentText = payload.response ?? payload.error ?? 'No response received.';
+
+      const agentMessage: ChatMessage = {
+        id: createMessageId(),
+        role: 'agent',
+        text: agentText,
+      };
+
+      syncSessionMessages(sessionId, [...optimisticMessages, agentMessage]);
+    } catch (error) {
+      const agentMessage: ChatMessage = {
+        id: createMessageId(),
+        role: 'agent',
+        text: error instanceof Error ? error.message : 'Unable to reach the backend server.',
+      };
+
+      syncSessionMessages(sessionId, [...optimisticMessages, agentMessage]);
+    } finally {
+      setIsPending(false);
+      textareaRef.current?.focus();
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-[#f7f7f5] text-zinc-900">
+      <div className="flex min-h-screen">
+        <aside className="flex w-[240px] shrink-0 flex-col border-r border-zinc-200 bg-zinc-50/90 px-4 py-4 backdrop-blur">
+          <div className="flex items-center justify-between px-1 pb-4 pt-1">
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-[0.32em] text-zinc-500">
+                Workspace
+              </p>
+              <h1 className="mt-2 text-sm font-semibold tracking-tight text-zinc-900">SAGENT-QL</h1>
             </div>
-            <h2 className="max-w-2xl text-5xl font-semibold tracking-tight text-white sm:text-6xl">
-              Build a private SQL and spreadsheet AI agent without wrapper SDKs.
-            </h2>
-            <p className="max-w-2xl text-lg leading-8 text-slate-300">
-              This starter gives you a decoupled frontend and backend so you can wire chat,
-              tool selection, and execution directly against the raw model and local data.
-            </p>
-            <div className="flex flex-wrap gap-3 text-sm text-slate-300">
-              <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2">
-                Gemini SDK ready
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2">
-                SQLite + ExcelJS
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2">
-                Express API bridge
-              </span>
-            </div>
+            <span className="rounded-full border border-zinc-200 bg-white px-2 py-1 text-[11px] font-medium text-zinc-500">
+              Local
+            </span>
           </div>
 
-          <div className="grid gap-4 rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl shadow-cyan-950/30 backdrop-blur">
-            {capabilities.map((item) => {
-              const Icon = item.icon;
-              return (
-                <article
-                  key={item.title}
-                  className="rounded-2xl border border-white/10 bg-slate-900/60 p-5 transition hover:border-cyan-300/30 hover:bg-slate-900"
-                >
-                  <div className="flex items-start gap-4">
-                    <div className="rounded-xl bg-cyan-400/10 p-3 text-cyan-300">
-                      <Icon className="h-5 w-5" />
+          <button
+            type="button"
+            onClick={createNewConversation}
+            className="mb-4 flex items-center gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-3 text-sm font-medium text-zinc-800 shadow-[0_1px_0_rgba(255,255,255,0.7)] transition hover:border-zinc-300 hover:bg-zinc-50"
+          >
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-zinc-900 text-white">
+              <Plus className="h-3.5 w-3.5" />
+            </span>
+            New Conversation
+          </button>
+
+          <div className="space-y-1 overflow-y-auto pr-1">
+            {sessions.map((session) => (
+              <SessionItem
+                key={session.id}
+                session={session}
+                active={session.id === sessionId}
+                onSelect={() => openSession(session.id)}
+              />
+            ))}
+          </div>
+
+          <div className="mt-auto px-1 pb-1 pt-4 text-xs leading-5 text-zinc-500">
+            Sessions persist locally through SQLite memory.
+          </div>
+        </aside>
+
+        <section className="relative flex min-h-screen flex-1 overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.9),_rgba(247,247,245,1)_45%)]">
+          <div className="flex flex-1 flex-col">
+            <div className="flex-1 overflow-y-auto px-4 pb-36 pt-8 sm:px-6 lg:px-8">
+              <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+                <div className="mb-4 flex items-center justify-between border-b border-zinc-200/70 pb-4">
+                  <div>
+                    <p className="text-[11px] font-medium uppercase tracking-[0.32em] text-zinc-500">
+                      Conversation
+                    </p>
+                    <h2 className="mt-2 text-lg font-semibold tracking-tight text-zinc-900">
+                      {sessions.find((session) => session.id === sessionId)?.title ?? 'Session'}
+                    </h2>
+                  </div>
+                  <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-500 shadow-sm">
+                    <Sparkles className="h-3.5 w-3.5 text-zinc-400" />
+                    {isPending ? 'Working' : 'Ready'}
+                  </div>
+                </div>
+
+                {messages.length === 0 && !isPending ? (
+                  <div className="rounded-3xl border border-dashed border-zinc-200 bg-white/60 px-6 py-10 text-center text-sm leading-6 text-zinc-500 shadow-[0_1px_0_rgba(255,255,255,0.9)]">
+                    Start with a question, a SQL prompt, or a spreadsheet path.
+                  </div>
+                ) : null}
+
+                {messages.map((message) =>
+                  message.role === 'user' ? (
+                    <div key={message.id} className="flex justify-end">
+                      <div className="max-w-[82%] rounded-3xl rounded-br-md bg-zinc-900 px-4 py-3 text-sm leading-6 text-white shadow-sm">
+                        {message.text}
+                      </div>
                     </div>
-                    <div>
-                      <h3 className="text-base font-medium text-white">{item.title}</h3>
-                      <p className="mt-2 text-sm leading-6 text-slate-300">{item.description}</p>
+                  ) : (
+                    <div key={message.id} className="flex justify-start">
+                      <div className="max-w-[82%] rounded-3xl rounded-bl-md border border-zinc-200/70 bg-zinc-100/70 px-4 py-3 text-sm leading-7 text-zinc-800 shadow-[0_1px_0_rgba(255,255,255,0.8)]">
+                        {message.text}
+                      </div>
+                    </div>
+                  )
+                )}
+
+                {isPending ? (
+                  <div className="flex justify-start">
+                    <div className="rounded-3xl rounded-bl-md border border-zinc-200/70 bg-zinc-100/70 shadow-[0_1px_0_rgba(255,255,255,0.8)]">
+                      <LoadingDots />
                     </div>
                   </div>
-                </article>
-              );
-            })}
+                ) : null}
+
+                <div ref={messagesEndRef} />
+              </div>
+            </div>
+
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 px-4 pb-4 sm:px-6 lg:px-8 lg:pb-6">
+              <div className="mx-auto flex w-full max-w-3xl justify-center">
+                <form
+                  className="pointer-events-auto flex w-full items-end gap-3 rounded-full border border-zinc-200/80 bg-white/85 px-4 py-3 shadow-[0_18px_50px_rgba(24,24,27,0.08)] backdrop-blur-md"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void handleSendMessage(draft);
+                  }}
+                >
+                  <textarea
+                    ref={textareaRef}
+                    rows={1}
+                    value={draft}
+                    onChange={(event) => setDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !event.shiftKey) {
+                        event.preventDefault();
+                        void handleSendMessage(draft);
+                      }
+                    }}
+                    placeholder="Ask about sales, scan a file, or request a local query..."
+                    className="max-h-32 flex-1 resize-none bg-transparent px-1 py-1 text-sm leading-6 text-zinc-900 outline-none placeholder:text-zinc-400"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!draft.trim() || isPending}
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border transition ${
+                      draft.trim() && !isPending
+                        ? 'border-zinc-900 bg-zinc-900 text-white shadow-sm'
+                        : 'border-zinc-200 bg-zinc-100 text-zinc-400'
+                    }`}
+                    aria-label="Send message"
+                  >
+                    <ArrowUpRight className="h-4 w-4" />
+                  </button>
+                </form>
+              </div>
+            </div>
           </div>
         </section>
       </div>
