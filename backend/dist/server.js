@@ -8,6 +8,7 @@ const cors_1 = __importDefault(require("cors"));
 const express_1 = __importDefault(require("express"));
 const genai_1 = require("@google/genai");
 const db_1 = require("./db");
+const excelScanner_1 = require("./excelScanner");
 const executeSqlTool = {
     name: 'executeLocalSql',
     description: 'Executes a raw read or write SQL query against the local SQLite database. Use this anytime the user asks to view, insert, modify, or analyze database information.',
@@ -20,6 +21,20 @@ const executeSqlTool = {
             },
         },
         required: ['query'],
+    },
+};
+const scanSpreadsheetTool = {
+    name: 'scanSpreadsheetFile',
+    description: 'Scans an Excel spreadsheet (.xlsx) or CSV file at a local path. Returns sheet names, column headers, and sample row data so you can understand its schema before writing insert statements.',
+    parameters: {
+        type: 'OBJECT',
+        properties: {
+            filePath: {
+                type: 'STRING',
+                description: 'The absolute or relative local path to the spreadsheet file.',
+            },
+        },
+        required: ['filePath'],
     },
 };
 const apiKey = process.env.GEMINI_API_KEY;
@@ -44,23 +59,40 @@ function createModelTurn(functionCalls) {
         parts: functionCalls.map((functionCall) => ({ functionCall })),
     };
 }
-function createToolResponseTurn(functionCalls) {
+function isSupportedFunctionCall(functionCall) {
+    return functionCall.name === executeSqlTool.name || functionCall.name === scanSpreadsheetTool.name;
+}
+async function createToolResponseTurn(functionCalls) {
+    const parts = await Promise.all(functionCalls.map(async (functionCall) => {
+        let executionResult;
+        switch (functionCall.name) {
+            case executeSqlTool.name: {
+                const query = typeof functionCall.args?.query === 'string' ? functionCall.args.query : '';
+                const sqlResult = (0, db_1.executeLocalQuery)(query);
+                const isErrorMessage = typeof sqlResult === 'string' && !sqlResult.startsWith('Rows modified: ');
+                executionResult = isErrorMessage ? { error: sqlResult } : { output: sqlResult };
+                break;
+            }
+            case scanSpreadsheetTool.name: {
+                const filePath = typeof functionCall.args?.filePath === 'string' ? functionCall.args.filePath : '';
+                executionResult = await (0, excelScanner_1.scanLocalWorkbook)(filePath);
+                break;
+            }
+            default: {
+                executionResult = { error: `Unsupported function call: ${functionCall.name ?? 'unknown'}` };
+            }
+        }
+        return {
+            functionResponse: {
+                id: functionCall.id,
+                name: functionCall.name,
+                response: executionResult,
+            },
+        };
+    }));
     return {
         role: 'user',
-        parts: functionCalls.map((functionCall) => {
-            const query = typeof functionCall.args?.query === 'string' ? functionCall.args.query : '';
-            const executionResult = (0, db_1.executeLocalQuery)(query);
-            const isErrorMessage = typeof executionResult === 'string' && !executionResult.startsWith('Rows modified: ');
-            return {
-                functionResponse: {
-                    id: functionCall.id,
-                    name: functionCall.name,
-                    response: isErrorMessage
-                        ? { error: executionResult }
-                        : { output: executionResult },
-                },
-            };
-        }),
+        parts,
     };
 }
 async function generateChatResponse(contents) {
@@ -72,6 +104,9 @@ async function generateChatResponse(contents) {
             tools: [
                 {
                     functionDeclarations: [executeSqlTool],
+                },
+                {
+                    functionDeclarations: [scanSpreadsheetTool],
                 },
             ],
         },
@@ -86,15 +121,15 @@ app.post('/api/chat', async (request, response) => {
     try {
         const initialResponse = await generateChatResponse(messages);
         const functionCalls = initialResponse.functionCalls ?? [];
-        const sqlFunctionCalls = functionCalls.filter((functionCall) => functionCall.name === executeSqlTool.name);
-        if (sqlFunctionCalls.length === 0) {
+        const supportedFunctionCalls = functionCalls.filter(isSupportedFunctionCall);
+        if (supportedFunctionCalls.length === 0) {
             response.json({ response: initialResponse.text ?? '' });
             return;
         }
         const updatedHistory = [
             ...messages,
             createModelTurn(functionCalls),
-            createToolResponseTurn(sqlFunctionCalls),
+            await createToolResponseTurn(supportedFunctionCalls),
         ];
         const finalResponse = await generateChatResponse(updatedHistory);
         response.json({ response: finalResponse.text ?? '' });
