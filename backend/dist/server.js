@@ -62,6 +62,15 @@ function createModelTurn(functionCalls) {
 function isSupportedFunctionCall(functionCall) {
     return functionCall.name === executeSqlTool.name || functionCall.name === scanSpreadsheetTool.name;
 }
+function isRateLimitError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = typeof error?.status === 'number' ? error.status : undefined;
+    const code = typeof error?.code === 'number' ? error.code : undefined;
+    return (status === 429 ||
+        code === 429 ||
+        message.includes('RESOURCE_EXHAUSTED') ||
+        message.includes('429'));
+}
 async function createToolResponseTurn(functionCalls) {
     const parts = await Promise.all(functionCalls.map(async (functionCall) => {
         let executionResult;
@@ -96,21 +105,31 @@ async function createToolResponseTurn(functionCalls) {
     };
 }
 async function generateChatResponse(contents) {
-    return ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: contents,
-        config: {
-            systemInstruction: "You are an analytical local database agent. You have access to a local SQLite database with tables like 'sales'. Do not invent column or table names; always use correct SQL syntax. If an operation fails, you will receive the raw error message to help you self-correct.",
-            tools: [
-                {
-                    functionDeclarations: [executeSqlTool],
-                },
-                {
-                    functionDeclarations: [scanSpreadsheetTool],
-                },
-            ],
-        },
-    });
+    try {
+        return await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: contents,
+            config: {
+                systemInstruction: "You are an analytical local database agent. You have access to a local SQLite database with tables like 'sales'. Do not invent column or table names; always use correct SQL syntax. If an operation fails, you will receive the raw error message to help you self-correct. ALWAYS format SQL query outputs and spreadsheet summaries using clean Markdown tables instead of raw JSON blocks.",
+                tools: [
+                    {
+                        functionDeclarations: [executeSqlTool],
+                    },
+                    {
+                        functionDeclarations: [scanSpreadsheetTool],
+                    },
+                ],
+            },
+        });
+    }
+    catch (error) {
+        if (isRateLimitError(error)) {
+            const rateLimitError = new Error("Rate limit exceeded. You've used up your free Gemini API daily quota. Please try again later.");
+            rateLimitError.status = 429;
+            throw rateLimitError;
+        }
+        throw error;
+    }
 }
 app.post('/api/chat', async (request, response) => {
     const messages = request.body.messages;
@@ -155,6 +174,12 @@ app.post('/api/chat', async (request, response) => {
         response.json({ response: finalText });
     }
     catch (error) {
+        if (isRateLimitError(error)) {
+            response.status(429).json({
+                error: "Rate limit exceeded. You've used up your free Gemini API daily quota. Please try again later.",
+            });
+            return;
+        }
         const message = error instanceof Error ? error.message : 'Unknown Gemini error';
         response.status(500).json({ error: message });
     }

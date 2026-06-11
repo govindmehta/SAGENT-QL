@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, Plus, Sparkles } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 type ChatRole = 'user' | 'agent';
 
@@ -7,12 +9,18 @@ type ChatMessage = {
   id: string;
   role: ChatRole;
   text: string;
+  tone?: 'normal' | 'error';
 };
 
 type SessionSummary = {
   id: string;
   title: string;
   preview: string;
+};
+
+type ChatApiPayload = {
+  response?: string;
+  error?: string;
 };
 
 const initialSessionId = 'session-1';
@@ -72,7 +80,7 @@ function SessionItem({
       type="button"
       onClick={onSelect}
       className={`group w-full rounded-2xl px-3 py-3 text-left transition ${
-        active ? 'bg-zinc-900 text-white' : 'hover:bg-zinc-100 text-zinc-700'
+        active ? 'bg-zinc-900 text-white' : 'text-zinc-700 hover:bg-zinc-100'
       }`}
     >
       <div className="flex items-start gap-3">
@@ -89,6 +97,90 @@ function SessionItem({
         </div>
       </div>
     </button>
+  );
+}
+
+function MarkdownContent({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p: ({ children }) => <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
+        strong: ({ children }) => <strong className="font-semibold text-zinc-950">{children}</strong>,
+        em: ({ children }) => <em className="italic text-inherit">{children}</em>,
+        a: ({ children, href }) => (
+          <a
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            className="text-zinc-950 underline decoration-zinc-300 underline-offset-4 transition hover:decoration-zinc-500"
+          >
+            {children}
+          </a>
+        ),
+        ul: ({ children }) => <ul className="my-3 list-disc space-y-1 pl-5">{children}</ul>,
+        ol: ({ children }) => <ol className="my-3 list-decimal space-y-1 pl-5">{children}</ol>,
+        li: ({ children }) => <li className="pl-1 leading-7">{children}</li>,
+        blockquote: ({ children }) => (
+          <blockquote className="my-3 border-l-2 border-zinc-300 pl-4 text-zinc-600">{children}</blockquote>
+        ),
+        code: ({ inline, className, children }) => {
+          if (inline) {
+            return (
+              <code className="rounded-md bg-zinc-200/80 px-1.5 py-0.5 font-mono text-[0.86em] text-zinc-900">
+                {children}
+              </code>
+            );
+          }
+
+          return <code className={className}>{children}</code>;
+        },
+        pre: ({ children }) => (
+          <pre className="my-4 overflow-x-auto rounded-2xl border border-zinc-200 bg-zinc-950 px-4 py-4 text-[13px] leading-6 text-zinc-100 shadow-sm">
+            {children}
+          </pre>
+        ),
+        table: ({ children }) => (
+          <div className="my-4 overflow-x-auto rounded-2xl border border-zinc-200 bg-white shadow-sm">
+            <table className="w-full border-collapse text-left text-sm">{children}</table>
+          </div>
+        ),
+        thead: ({ children }) => <thead className="bg-zinc-100/90 text-zinc-700">{children}</thead>,
+        tbody: ({ children }) => <tbody className="divide-y divide-zinc-200 bg-white">{children}</tbody>,
+        tr: ({ children }) => <tr className="border-zinc-200">{children}</tr>,
+        th: ({ children }) => (
+          <th className="border-b border-zinc-200 px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] text-zinc-600">
+            {children}
+          </th>
+        ),
+        td: ({ children }) => <td className="border-b border-zinc-100 px-4 py-3 align-top text-zinc-800">{children}</td>,
+      }}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+}
+
+function AgentMessageBubble({ message }: { message: ChatMessage }) {
+  const isError = message.tone === 'error';
+
+  if (isError) {
+    return (
+      <div className="max-w-[82%] rounded-3xl rounded-bl-md border border-amber-200/80 bg-amber-50/80 px-4 py-3 text-sm leading-7 text-amber-900 shadow-[0_1px_0_rgba(255,255,255,0.8)]">
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-amber-700">
+          System notice
+        </div>
+        <div className="leading-7 text-amber-900">
+          <MarkdownContent text={message.text} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-[82%] rounded-3xl rounded-bl-md border border-zinc-200/70 bg-zinc-100/70 px-4 py-3 text-sm leading-7 text-zinc-800 shadow-[0_1px_0_rgba(255,255,255,0.8)]">
+      <MarkdownContent text={message.text} />
+    </div>
   );
 }
 
@@ -186,9 +278,21 @@ export default function App() {
         }),
       });
 
-      const payload = (await response.json()) as { response?: string; error?: string };
-      const agentText = payload.response ?? payload.error ?? 'No response received.';
+      const payload = (await response.json().catch(() => null)) as ChatApiPayload | null;
 
+      if (payload?.error) {
+        const errorMessage: ChatMessage = {
+          id: createMessageId(),
+          role: 'agent',
+          text: payload.error,
+          tone: 'error',
+        };
+
+        syncSessionMessages(sessionId, [...optimisticMessages, errorMessage]);
+        return;
+      }
+
+      const agentText = payload?.response ?? 'No response received.';
       const agentMessage: ChatMessage = {
         id: createMessageId(),
         role: 'agent',
@@ -200,7 +304,8 @@ export default function App() {
       const agentMessage: ChatMessage = {
         id: createMessageId(),
         role: 'agent',
-        text: error instanceof Error ? error.message : 'Unable to reach the backend server.',
+        text: error instanceof Error ? error.message : 'Network connection error.',
+        tone: 'error',
       };
 
       syncSessionMessages(sessionId, [...optimisticMessages, agentMessage]);
@@ -281,15 +386,13 @@ export default function App() {
                 {messages.map((message) =>
                   message.role === 'user' ? (
                     <div key={message.id} className="flex justify-end">
-                      <div className="max-w-[82%] rounded-3xl rounded-br-md bg-zinc-900 px-4 py-3 text-sm leading-6 text-white shadow-sm">
+                      <div className="max-w-[82%] rounded-3xl rounded-br-md bg-zinc-900 px-4 py-3 text-sm leading-7 text-white shadow-sm">
                         {message.text}
                       </div>
                     </div>
                   ) : (
                     <div key={message.id} className="flex justify-start">
-                      <div className="max-w-[82%] rounded-3xl rounded-bl-md border border-zinc-200/70 bg-zinc-100/70 px-4 py-3 text-sm leading-7 text-zinc-800 shadow-[0_1px_0_rgba(255,255,255,0.8)]">
-                        {message.text}
-                      </div>
+                      <AgentMessageBubble message={message} />
                     </div>
                   )
                 )}
